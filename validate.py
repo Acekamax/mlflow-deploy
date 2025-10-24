@@ -1,62 +1,72 @@
-# src/validate.py
-import joblib
-import pandas as pd
-from sklearn.metrics import mean_squared_error
-from sklearn.model_selection import train_test_split
-from sklearn.datasets import load_diabetes  # Importar load_diabetes
-import sys
 import os
+import sys
+from pathlib import Path
 
-# Parámetro de umbral
-THRESHOLD = 5000.0  # Ajusta este umbral según el MSE esperado para load_diabetes
+import mlflow
+import mlflow.sklearn
+from mlflow.tracking import MlflowClient
+from sklearn.datasets import load_diabetes
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
 
-# --- Cargar el MISMO dataset que en train.py ---
-print("--- Debug: Cargando dataset load_diabetes ---")
-X, y = load_diabetes(return_X_y=True, as_frame=True)  # Usar as_frame=True si quieres DataFrames
+# ===== Parámetro de calidad =====
+THRESHOLD_MSE = 3200.0  # ajusta si lo deseas
 
-# División de datos (usar los mismos datos que en entrenamiento no es ideal para validación real,
-# pero necesario aquí para que las dimensiones coincidan. Idealmente, tendrías un split dedicado
-# o usarías el X_test guardado del entrenamiento si fuera posible)
-# Para este ejemplo, simplemente re-dividimos para obtener un X_test con 10 features.
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)  # Añadir random_state para consistencia si es necesario
-print(f"--- Debug: Dimensiones de X_test: {X_test.shape} ---")  # Debería ser (n_samples, 10)
+# ===== Config MLflow coherente con train.py =====
+# Usa ENV en CI; si no existe, usa 'mlruns' local con URI válida (file:///...)
+tracking_uri = os.getenv(
+    "MLFLOW_TRACKING_URI",
+    (Path.cwd() / "mlruns").resolve().as_uri()
+)
+experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", "CI-CD-Lab2")
 
-# --- Cargar modelo previamente entrenado ---
-model_filename = "model.pkl"
-model_path = os.path.abspath(os.path.join(os.getcwd(), model_filename))
-print(f"--- Debug: Intentando cargar modelo desde: {model_path} ---")
+mlflow.set_tracking_uri(tracking_uri)
+print(f"--- Debug validate: tracking_uri = {tracking_uri} ---")
+print(f"--- Debug validate: experiment = {experiment_name} ---")
 
-try:
-    model = joblib.load(model_path)
-except FileNotFoundError:
-    print(f"--- ERROR: No se encontró el archivo del modelo en '{model_path}'. Asegúrate de que el paso 'make train' lo haya guardado correctamente en la raíz del proyecto. ---")
-    # Listar archivos en el directorio actual para depuración
-    print(f"--- Debug: Archivos en {os.getcwd()}: ---")
-    try:
-        print(os.listdir(os.getcwd()))
-    except Exception as list_err:
-        print(f"(No se pudo listar el directorio: {list_err})")
-    print("---")
-    sys.exit(1)  # Salir con error
-
-# --- Predicción y Validación ---
-print("--- Debug: Realizando predicciones ---")
-try:
-    y_pred = model.predict(X_test)  # Ahora X_test tiene 10 features
-except ValueError as pred_err:
-    print(f"--- ERROR durante la predicción: {pred_err} ---")
-    # Imprimir información de características si el error persiste
-    print(f"Modelo esperaba {model.n_features_in_} features.")
-    print(f"X_test tiene {X_test.shape[1]} features.")
+# Obtén el experimento
+exp = mlflow.get_experiment_by_name(experiment_name)
+if exp is None:
+    print(f"ERROR: No existe el experimento '{experiment_name}'. Corre primero train.py.")
     sys.exit(1)
 
-mse = mean_squared_error(y_test, y_pred)
-print(f"🔍 MSE del modelo: {mse:.4f} (umbral: {THRESHOLD})")
+# Busca el último run FINISHED
+client = MlflowClient()
+runs = client.search_runs(
+    experiment_ids=[exp.experiment_id],
+    filter_string="attributes.status = 'FINISHED'",
+    order_by=["attributes.start_time DESC"],
+    max_results=1,
+)
+if not runs:
+    print("ERROR: No hay runs finalizados para validar.")
+    sys.exit(1)
 
-# Validación
-if mse <= THRESHOLD:
+run = runs[0]
+run_id = run.info.run_id
+model_uri = f"runs:/{run_id}/model"
+print(f"--- Debug validate: usando run_id = {run_id} ---")
+print(f"--- Debug validate: model_uri = {model_uri} ---")
+
+# Cargar modelo desde MLflow
+model = mlflow.sklearn.load_model(model_uri)
+
+# Cargar datos y replicar el split del entrenamiento
+X, y = load_diabetes(return_X_y=True)
+_, X_test, _, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+print(f"--- Debug validate: X_test shape = {X_test.shape} ---")
+
+# Métrica
+y_pred = model.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+print(f"🔍 MSE validación: {mse:.4f} (umbral: {THRESHOLD_MSE})")
+
+# Criterio de aceptación
+if mse <= THRESHOLD_MSE:
     print("✅ El modelo cumple los criterios de calidad.")
-    sys.exit(0)  # éxito
+    sys.exit(0)
 else:
-    print("❌ El modelo no cumple el umbral. Deteniendo pipeline.")
-    sys.exit(1)  # error
+    print("❌ El modelo NO cumple el umbral. Deteniendo pipeline.")
+    sys.exit(1)
