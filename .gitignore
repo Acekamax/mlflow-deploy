@@ -1,0 +1,22 @@
+# Entorno virtual
+.venv/
+
+# Artefactos locales de MLflow
+mlruns/
+
+# Cachés de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pytest_cache/
+.coverage
+htmlcov/
+
+# Archivos temporales del sistema
+.DS_Store
+Thumbs.db
+
+# Modelos o archivos grandes generados
+*.pkl
+*.joblib
